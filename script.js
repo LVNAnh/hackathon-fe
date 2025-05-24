@@ -5,6 +5,7 @@ class VideoCallApp {
     });
     this.localStream = null;
     this.peerConnections = new Map();
+    this.iceCandidatesQueue = new Map(); // Queue for ICE candidates
     this.currentRoomId = null;
     this.userName = null;
     this.isVideoEnabled = true;
@@ -62,48 +63,40 @@ class VideoCallApp {
   }
 
   setupSocketListeners() {
-    // Khi có user mới tham gia, tạo offer cho họ
+    // Khi có user mới tham gia - chỉ user đã có trước đó sẽ tạo offer
     this.socket.on("user-joined", async (user) => {
       console.log("New user joined:", user);
       if (this.localStream) {
-        await this.createOfferForUser(user.id);
+        // Tạo offer cho user mới
+        await this.initiateCall(user.id);
       }
     });
 
-    // Khi join room, nhận danh sách user đã có và tạo offer cho tất cả
-    this.socket.on("existing-users", async (users) => {
-      console.log("Existing users:", users);
-      for (const user of users) {
-        if (this.localStream) {
-          await this.createOfferForUser(user.id);
-        }
-      }
+    // Khi nhận offer từ user khác
+    this.socket.on("offer", async (data) => {
+      console.log("Received offer from:", data.caller);
+      await this.handleIncomingCall(data.caller, data.offer);
+    });
+
+    // Khi nhận answer
+    this.socket.on("answer", async (data) => {
+      console.log("Received answer from:", data.answerer);
+      await this.handleCallAnswer(data.answerer, data.answer);
+    });
+
+    // Khi nhận ICE candidate
+    this.socket.on("ice-candidate", async (data) => {
+      console.log("Received ICE candidate from:", data.sender);
+      await this.handleNewICECandidate(data.sender, data.candidate);
     });
 
     this.socket.on("user-left", (userId) => {
       console.log("User left:", userId);
-      this.removeRemoteVideo(userId);
-      if (this.peerConnections.has(userId)) {
-        this.peerConnections.get(userId).close();
-        this.peerConnections.delete(userId);
-      }
-    });
-
-    this.socket.on("offer", async (data) => {
-      console.log("Received offer from:", data.caller);
-      await this.handleOffer(data);
-    });
-
-    this.socket.on("answer", async (data) => {
-      console.log("Received answer from:", data.answerer);
-      await this.handleAnswer(data);
-    });
-
-    this.socket.on("ice-candidate", async (data) => {
-      await this.handleIceCandidate(data);
+      this.cleanupPeerConnection(userId);
     });
 
     this.socket.on("error", (message) => {
+      console.error("Socket error:", message);
       alert("Lỗi: " + message);
     });
   }
@@ -117,6 +110,7 @@ class VideoCallApp {
       this.currentRoomId = data.roomId;
       this.showWaitingScreen();
     } catch (error) {
+      console.error("Error creating room:", error);
       alert("Không thể tạo phòng. Vui lòng thử lại.");
     }
   }
@@ -139,6 +133,7 @@ class VideoCallApp {
         alert("Phòng không tồn tại");
       }
     } catch (error) {
+      console.error("Error checking room:", error);
       alert("Không thể kiểm tra phòng. Vui lòng thử lại.");
     }
   }
@@ -147,11 +142,24 @@ class VideoCallApp {
     this.userName = this.userNameInput.value.trim() || `User${Date.now()}`;
 
     try {
+      console.log("Getting user media...");
       this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 1280, height: 720 },
-        audio: true,
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 24 },
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
 
+      console.log(
+        "Got local stream with tracks:",
+        this.localStream.getTracks().map((t) => t.kind)
+      );
       this.localVideo.srcObject = this.localStream;
 
       // Join room sau khi có stream
@@ -163,35 +171,47 @@ class VideoCallApp {
       this.showCallScreen();
     } catch (error) {
       console.error("Error accessing media devices:", error);
-      alert("Không thể truy cập camera/microphone. Vui lòng cấp quyền.");
+      alert(
+        "Không thể truy cập camera/microphone. Vui lòng cấp quyền và thử lại."
+      );
     }
   }
 
-  async createPeerConnection(userId) {
-    const pc = new RTCPeerConnection({
+  // Tạo peer connection mới
+  createPeerConnection(userId) {
+    console.log("Creating peer connection for:", userId);
+
+    const configuration = {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun2.l.google.com:19302" },
       ],
-    });
+    };
 
-    // Add local stream tracks
+    const peerConnection = new RTCPeerConnection(configuration);
+
+    // Thêm local tracks vào peer connection
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => {
-        pc.addTrack(track, this.localStream);
+        console.log(
+          `Adding ${track.kind} track to peer connection for ${userId}`
+        );
+        peerConnection.addTrack(track, this.localStream);
       });
     }
 
-    // Handle remote stream
-    pc.ontrack = (event) => {
-      console.log("Received remote stream from:", userId);
+    // Xử lý remote stream
+    peerConnection.ontrack = (event) => {
+      console.log(`Received ${event.track.kind} track from ${userId}`);
       const [remoteStream] = event.streams;
-      this.addRemoteVideo(userId, remoteStream);
+      this.displayRemoteStream(userId, remoteStream);
     };
 
-    // Handle ICE candidates
-    pc.onicecandidate = (event) => {
+    // Xử lý ICE candidates
+    peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log("Sending ICE candidate to:", userId);
         this.socket.emit("ice-candidate", {
           target: userId,
           candidate: event.candidate,
@@ -199,76 +219,143 @@ class VideoCallApp {
       }
     };
 
-    // Connection state logging
-    pc.onconnectionstatechange = () => {
-      console.log(`Connection state with ${userId}:`, pc.connectionState);
+    // Monitor connection state
+    peerConnection.onconnectionstatechange = () => {
+      console.log(
+        `Connection state with ${userId}:`,
+        peerConnection.connectionState
+      );
     };
 
-    this.peerConnections.set(userId, pc);
-    return pc;
+    peerConnection.oniceconnectionstatechange = () => {
+      console.log(
+        `ICE connection state with ${userId}:`,
+        peerConnection.iceConnectionState
+      );
+    };
+
+    this.peerConnections.set(userId, peerConnection);
+    return peerConnection;
   }
 
-  async createOfferForUser(userId) {
+  // Khởi tạo cuộc gọi (tạo offer)
+  async initiateCall(userId) {
     try {
-      const pc = await this.createPeerConnection(userId);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+      console.log("Initiating call to:", userId);
 
+      const peerConnection = this.createPeerConnection(userId);
+
+      const offer = await peerConnection.createOffer({
+        offerToReceiveVideo: true,
+        offerToReceiveAudio: true,
+      });
+
+      await peerConnection.setLocalDescription(offer);
+
+      console.log("Sending offer to:", userId);
       this.socket.emit("offer", {
         target: userId,
         offer: offer,
       });
-
-      console.log("Sent offer to:", userId);
     } catch (error) {
-      console.error("Error creating offer for user:", userId, error);
+      console.error("Error initiating call:", error);
     }
   }
 
-  async handleOffer(data) {
+  // Xử lý cuộc gọi đến (nhận offer)
+  async handleIncomingCall(callerId, offer) {
     try {
-      const pc = await this.createPeerConnection(data.caller);
-      await pc.setRemoteDescription(data.offer);
+      console.log("Handling incoming call from:", callerId);
 
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
+      const peerConnection = this.createPeerConnection(callerId);
 
+      await peerConnection.setRemoteDescription(offer);
+
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+
+      console.log("Sending answer to:", callerId);
       this.socket.emit("answer", {
-        target: data.caller,
+        target: callerId,
         answer: answer,
       });
 
-      console.log("Sent answer to:", data.caller);
-    } catch (error) {
-      console.error("Error handling offer:", error);
-    }
-  }
-
-  async handleAnswer(data) {
-    try {
-      const pc = this.peerConnections.get(data.answerer);
-      if (pc && pc.signalingState === "have-local-offer") {
-        await pc.setRemoteDescription(data.answer);
-        console.log("Set remote description for:", data.answerer);
+      // Process queued ICE candidates
+      if (this.iceCandidatesQueue.has(callerId)) {
+        const queuedCandidates = this.iceCandidatesQueue.get(callerId);
+        for (const candidate of queuedCandidates) {
+          try {
+            await peerConnection.addIceCandidate(candidate);
+            console.log("Added queued ICE candidate from:", callerId);
+          } catch (error) {
+            console.error("Error adding queued ICE candidate:", error);
+          }
+        }
+        this.iceCandidatesQueue.delete(callerId);
       }
     } catch (error) {
-      console.error("Error handling answer:", error);
+      console.error("Error handling incoming call:", error);
     }
   }
 
-  async handleIceCandidate(data) {
+  // Xử lý answer
+  async handleCallAnswer(userId, answer) {
     try {
-      const pc = this.peerConnections.get(data.sender);
-      if (pc && pc.remoteDescription) {
-        await pc.addIceCandidate(data.candidate);
+      console.log("Handling call answer from:", userId);
+
+      const peerConnection = this.peerConnections.get(userId);
+      if (!peerConnection) {
+        console.error("No peer connection found for:", userId);
+        return;
+      }
+
+      await peerConnection.setRemoteDescription(answer);
+      console.log("Set remote description for:", userId);
+
+      // Process queued ICE candidates
+      if (this.iceCandidatesQueue.has(userId)) {
+        const queuedCandidates = this.iceCandidatesQueue.get(userId);
+        for (const candidate of queuedCandidates) {
+          try {
+            await peerConnection.addIceCandidate(candidate);
+            console.log("Added queued ICE candidate from:", userId);
+          } catch (error) {
+            console.error("Error adding queued ICE candidate:", error);
+          }
+        }
+        this.iceCandidatesQueue.delete(userId);
+      }
+    } catch (error) {
+      console.error("Error handling call answer:", error);
+    }
+  }
+
+  // Xử lý ICE candidate
+  async handleNewICECandidate(userId, candidate) {
+    try {
+      const peerConnection = this.peerConnections.get(userId);
+
+      if (peerConnection && peerConnection.remoteDescription) {
+        await peerConnection.addIceCandidate(candidate);
+        console.log("Added ICE candidate from:", userId);
+      } else {
+        console.log("Queuing ICE candidate from:", userId);
+        // Queue the candidate
+        if (!this.iceCandidatesQueue.has(userId)) {
+          this.iceCandidatesQueue.set(userId, []);
+        }
+        this.iceCandidatesQueue.get(userId).push(candidate);
       }
     } catch (error) {
       console.error("Error handling ICE candidate:", error);
     }
   }
 
-  addRemoteVideo(userId, stream) {
-    // Remove existing video if any
+  // Hiển thị remote stream
+  displayRemoteStream(userId, stream) {
+    console.log("Displaying remote stream for:", userId);
+
+    // Remove existing video nếu có
     this.removeRemoteVideo(userId);
 
     const videoContainer = document.createElement("div");
@@ -278,7 +365,25 @@ class VideoCallApp {
     const video = document.createElement("video");
     video.autoplay = true;
     video.playsinline = true;
+    video.muted = false;
+    video.controls = false;
+
+    // Set stream
     video.srcObject = stream;
+
+    // Add event listeners
+    video.onloadedmetadata = () => {
+      console.log("Remote video metadata loaded for:", userId);
+      video.play().catch(console.error);
+    };
+
+    video.onplay = () => {
+      console.log("Remote video started playing for:", userId);
+    };
+
+    video.onerror = (error) => {
+      console.error("Remote video error for:", userId, error);
+    };
 
     const label = document.createElement("div");
     label.className = "video-label";
@@ -288,7 +393,12 @@ class VideoCallApp {
     videoContainer.appendChild(label);
     this.remoteVideos.appendChild(videoContainer);
 
-    console.log("Added remote video for:", userId);
+    console.log("Remote video added for:", userId);
+
+    // Force play after a short delay
+    setTimeout(() => {
+      video.play().catch(console.error);
+    }, 100);
   }
 
   removeRemoteVideo(userId) {
@@ -297,6 +407,21 @@ class VideoCallApp {
       videoElement.remove();
       console.log("Removed remote video for:", userId);
     }
+  }
+
+  cleanupPeerConnection(userId) {
+    if (this.peerConnections.has(userId)) {
+      const peerConnection = this.peerConnections.get(userId);
+      peerConnection.close();
+      this.peerConnections.delete(userId);
+    }
+
+    if (this.iceCandidatesQueue.has(userId)) {
+      this.iceCandidatesQueue.delete(userId);
+    }
+
+    this.removeRemoteVideo(userId);
+    console.log("Cleaned up peer connection for:", userId);
   }
 
   toggleVideo() {
@@ -322,15 +447,24 @@ class VideoCallApp {
   }
 
   endCall() {
+    console.log("Ending call...");
+
     // Stop local stream
     if (this.localStream) {
-      this.localStream.getTracks().forEach((track) => track.stop());
+      this.localStream.getTracks().forEach((track) => {
+        track.stop();
+        console.log(`Stopped ${track.kind} track`);
+      });
       this.localStream = null;
     }
 
     // Close all peer connections
-    this.peerConnections.forEach((pc) => pc.close());
+    this.peerConnections.forEach((pc, userId) => {
+      console.log("Closing peer connection for:", userId);
+      pc.close();
+    });
     this.peerConnections.clear();
+    this.iceCandidatesQueue.clear();
 
     // Clear remote videos
     this.remoteVideos.innerHTML = "";
@@ -342,6 +476,11 @@ class VideoCallApp {
     this.toggleAudioBtn.classList.add("active");
     this.toggleVideoBtn.textContent = "📹";
     this.toggleAudioBtn.textContent = "🎤";
+
+    // Leave room
+    if (this.currentRoomId) {
+      this.socket.emit("leave-room", this.currentRoomId);
+    }
 
     this.goHome();
   }
