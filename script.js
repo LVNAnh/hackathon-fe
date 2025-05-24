@@ -1,6 +1,6 @@
 class VideoCallApp {
   constructor() {
-    this.socket = io("http://localhost:4000", {
+    this.socket = io("https://hackathon-be-xaqp.onrender.com", {
       transports: ["websocket", "polling"],
     });
     this.localStream = null;
@@ -103,9 +103,12 @@ class VideoCallApp {
 
   async createRoom() {
     try {
-      const response = await fetch("http://localhost:4000/api/create-room", {
-        method: "POST",
-      });
+      const response = await fetch(
+        "https://hackathon-be-xaqp.onrender.com/api/create-room",
+        {
+          method: "POST",
+        }
+      );
       const data = await response.json();
       this.currentRoomId = data.roomId;
       this.showWaitingScreen();
@@ -123,7 +126,9 @@ class VideoCallApp {
     }
 
     try {
-      const response = await fetch(`http://localhost:4000/api/room/${roomId}`);
+      const response = await fetch(
+        `https://hackathon-be-xaqp.onrender.com/api/room/${roomId}`
+      );
       const data = await response.json();
 
       if (data.exists) {

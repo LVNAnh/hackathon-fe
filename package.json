@@ -2,7 +2,9 @@
   "name": "video-call-frontend",
   "version": "1.0.0",
   "scripts": {
-    "start": "http-server -p 8080 -c-1"
+    "start": "http-server dist -p 8080 -c-1",
+    "build": "bash build.sh",
+    "dev": "http-server -p 8080 -c-1"
   },
   "dependencies": {
     "http-server": "^14.1.1"
