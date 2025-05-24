@@ -148,23 +148,43 @@ class VideoCallApp {
 
     try {
       console.log("Getting user media...");
-      this.localStream = await navigator.mediaDevices.getUserMedia({
+
+      // Cấu hình media constraints tối ưu cho các mạng khác nhau
+      const constraints = {
         video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 24 },
+          width: {
+            min: 320,
+            ideal: 640,
+            max: 1280,
+          },
+          height: {
+            min: 240,
+            ideal: 480,
+            max: 720,
+          },
+          frameRate: {
+            min: 15,
+            ideal: 24,
+            max: 30,
+          },
+          facingMode: "user",
         },
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
+          sampleRate: 44100,
+          channelCount: 1, // Mono để tiết kiệm bandwidth
         },
-      });
+      };
+
+      this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
 
       console.log(
         "Got local stream with tracks:",
-        this.localStream.getTracks().map((t) => t.kind)
+        this.localStream.getTracks().map((t) => `${t.kind}: ${t.label}`)
       );
+
       this.localVideo.srcObject = this.localStream;
 
       // Join room sau khi có stream
@@ -176,9 +196,36 @@ class VideoCallApp {
       this.showCallScreen();
     } catch (error) {
       console.error("Error accessing media devices:", error);
-      alert(
-        "Không thể truy cập camera/microphone. Vui lòng cấp quyền và thử lại."
-      );
+
+      // Fallback với chất lượng thấp hơn nếu không thể lấy video chất lượng cao
+      try {
+        console.log("Trying fallback with lower quality...");
+        const fallbackConstraints = {
+          video: {
+            width: { ideal: 320 },
+            height: { ideal: 240 },
+            frameRate: { ideal: 15 },
+          },
+          audio: true,
+        };
+
+        this.localStream = await navigator.mediaDevices.getUserMedia(
+          fallbackConstraints
+        );
+        this.localVideo.srcObject = this.localStream;
+
+        this.socket.emit("join-room", {
+          roomId: this.currentRoomId,
+          userName: this.userName,
+        });
+
+        this.showCallScreen();
+      } catch (fallbackError) {
+        console.error("Fallback also failed:", fallbackError);
+        alert(
+          "Không thể truy cập camera/microphone. Vui lòng cấp quyền và thử lại."
+        );
+      }
     }
   }
 
@@ -188,10 +235,33 @@ class VideoCallApp {
 
     const configuration = {
       iceServers: [
+        // STUN servers (miễn phí)
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
         { urls: "stun:stun2.l.google.com:19302" },
+        { urls: "stun:stun3.l.google.com:19302" },
+        { urls: "stun:stun4.l.google.com:19302" },
+
+        // TURN servers miễn phí (có thể không ổn định)
+        {
+          urls: "turn:openrelay.metered.ca:80",
+          username: "openrelayproject",
+          credential: "openrelayproject",
+        },
+        {
+          urls: "turn:openrelay.metered.ca:443",
+          username: "openrelayproject",
+          credential: "openrelayproject",
+        },
+        {
+          urls: "turn:openrelay.metered.ca:443?transport=tcp",
+          username: "openrelayproject",
+          credential: "openrelayproject",
+        },
       ],
+      iceCandidatePoolSize: 10,
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require",
     };
 
     const peerConnection = new RTCPeerConnection(configuration);
@@ -216,7 +286,8 @@ class VideoCallApp {
     // Xử lý ICE candidates
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log("Sending ICE candidate to:", userId);
+        console.log("ICE candidate type:", event.candidate.type);
+        console.log("ICE candidate:", event.candidate.candidate);
         this.socket.emit("ice-candidate", {
           target: userId,
           candidate: event.candidate,
@@ -230,12 +301,23 @@ class VideoCallApp {
         `Connection state with ${userId}:`,
         peerConnection.connectionState
       );
+      if (peerConnection.connectionState === "failed") {
+        console.log("Connection failed, attempting to restart ICE");
+        peerConnection.restartIce();
+      }
     };
 
     peerConnection.oniceconnectionstatechange = () => {
       console.log(
         `ICE connection state with ${userId}:`,
         peerConnection.iceConnectionState
+      );
+    };
+
+    peerConnection.onicegatheringstatechange = () => {
+      console.log(
+        `ICE gathering state with ${userId}:`,
+        peerConnection.iceGatheringState
       );
     };
 
