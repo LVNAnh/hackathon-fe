@@ -1,6 +1,8 @@
 class VideoCallApp {
   constructor() {
-    this.socket = io("https://hackathon-be-xaqp.onrender.com");
+    this.socket = io("http://localhost:4000", {
+      transports: ["websocket", "polling"],
+    });
     this.localStream = null;
     this.peerConnections = new Map();
     this.currentRoomId = null;
@@ -60,15 +62,26 @@ class VideoCallApp {
   }
 
   setupSocketListeners() {
-    this.socket.on("users-in-room", (users) => {
-      console.log("Users in room:", users);
+    // Khi có user mới tham gia, tạo offer cho họ
+    this.socket.on("user-joined", async (user) => {
+      console.log("New user joined:", user);
+      if (this.localStream) {
+        await this.createOfferForUser(user.id);
+      }
     });
 
-    this.socket.on("user-joined", (user) => {
-      console.log("User joined:", user);
+    // Khi join room, nhận danh sách user đã có và tạo offer cho tất cả
+    this.socket.on("existing-users", async (users) => {
+      console.log("Existing users:", users);
+      for (const user of users) {
+        if (this.localStream) {
+          await this.createOfferForUser(user.id);
+        }
+      }
     });
 
     this.socket.on("user-left", (userId) => {
+      console.log("User left:", userId);
       this.removeRemoteVideo(userId);
       if (this.peerConnections.has(userId)) {
         this.peerConnections.get(userId).close();
@@ -77,10 +90,12 @@ class VideoCallApp {
     });
 
     this.socket.on("offer", async (data) => {
+      console.log("Received offer from:", data.caller);
       await this.handleOffer(data);
     });
 
     this.socket.on("answer", async (data) => {
+      console.log("Received answer from:", data.answerer);
       await this.handleAnswer(data);
     });
 
@@ -95,12 +110,9 @@ class VideoCallApp {
 
   async createRoom() {
     try {
-      const response = await fetch(
-        "https://hackathon-be-xaqp.onrender.com/api/create-room",
-        {
-          method: "POST",
-        }
-      );
+      const response = await fetch("http://localhost:4000/api/create-room", {
+        method: "POST",
+      });
       const data = await response.json();
       this.currentRoomId = data.roomId;
       this.showWaitingScreen();
@@ -117,9 +129,7 @@ class VideoCallApp {
     }
 
     try {
-      const response = await fetch(
-        `https://hackathon-be-xaqp.onrender.com/api/room/${roomId}`
-      );
+      const response = await fetch(`http://localhost:4000/api/room/${roomId}`);
       const data = await response.json();
 
       if (data.exists) {
@@ -138,11 +148,13 @@ class VideoCallApp {
 
     try {
       this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
+        video: { width: 1280, height: 720 },
         audio: true,
       });
 
       this.localVideo.srcObject = this.localStream;
+
+      // Join room sau khi có stream
       this.socket.emit("join-room", {
         roomId: this.currentRoomId,
         userName: this.userName,
@@ -150,23 +162,31 @@ class VideoCallApp {
 
       this.showCallScreen();
     } catch (error) {
+      console.error("Error accessing media devices:", error);
       alert("Không thể truy cập camera/microphone. Vui lòng cấp quyền.");
     }
   }
 
   async createPeerConnection(userId) {
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+      ],
     });
 
-    // Add local stream
-    this.localStream.getTracks().forEach((track) => {
-      pc.addTrack(track, this.localStream);
-    });
+    // Add local stream tracks
+    if (this.localStream) {
+      this.localStream.getTracks().forEach((track) => {
+        pc.addTrack(track, this.localStream);
+      });
+    }
 
     // Handle remote stream
     pc.ontrack = (event) => {
-      this.addRemoteVideo(userId, event.streams[0]);
+      console.log("Received remote stream from:", userId);
+      const [remoteStream] = event.streams;
+      this.addRemoteVideo(userId, remoteStream);
     };
 
     // Handle ICE candidates
@@ -179,37 +199,78 @@ class VideoCallApp {
       }
     };
 
+    // Connection state logging
+    pc.onconnectionstatechange = () => {
+      console.log(`Connection state with ${userId}:`, pc.connectionState);
+    };
+
     this.peerConnections.set(userId, pc);
     return pc;
   }
 
-  async handleOffer(data) {
-    const pc = await this.createPeerConnection(data.caller);
-    await pc.setRemoteDescription(data.offer);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+  async createOfferForUser(userId) {
+    try {
+      const pc = await this.createPeerConnection(userId);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
 
-    this.socket.emit("answer", {
-      target: data.caller,
-      answer: answer,
-    });
+      this.socket.emit("offer", {
+        target: userId,
+        offer: offer,
+      });
+
+      console.log("Sent offer to:", userId);
+    } catch (error) {
+      console.error("Error creating offer for user:", userId, error);
+    }
+  }
+
+  async handleOffer(data) {
+    try {
+      const pc = await this.createPeerConnection(data.caller);
+      await pc.setRemoteDescription(data.offer);
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      this.socket.emit("answer", {
+        target: data.caller,
+        answer: answer,
+      });
+
+      console.log("Sent answer to:", data.caller);
+    } catch (error) {
+      console.error("Error handling offer:", error);
+    }
   }
 
   async handleAnswer(data) {
-    const pc = this.peerConnections.get(data.answerer);
-    if (pc) {
-      await pc.setRemoteDescription(data.answer);
+    try {
+      const pc = this.peerConnections.get(data.answerer);
+      if (pc && pc.signalingState === "have-local-offer") {
+        await pc.setRemoteDescription(data.answer);
+        console.log("Set remote description for:", data.answerer);
+      }
+    } catch (error) {
+      console.error("Error handling answer:", error);
     }
   }
 
   async handleIceCandidate(data) {
-    const pc = this.peerConnections.get(data.sender);
-    if (pc) {
-      await pc.addIceCandidate(data.candidate);
+    try {
+      const pc = this.peerConnections.get(data.sender);
+      if (pc && pc.remoteDescription) {
+        await pc.addIceCandidate(data.candidate);
+      }
+    } catch (error) {
+      console.error("Error handling ICE candidate:", error);
     }
   }
 
   addRemoteVideo(userId, stream) {
+    // Remove existing video if any
+    this.removeRemoteVideo(userId);
+
     const videoContainer = document.createElement("div");
     videoContainer.className = "video-container";
     videoContainer.id = `remote-${userId}`;
@@ -226,35 +287,45 @@ class VideoCallApp {
     videoContainer.appendChild(video);
     videoContainer.appendChild(label);
     this.remoteVideos.appendChild(videoContainer);
+
+    console.log("Added remote video for:", userId);
   }
 
   removeRemoteVideo(userId) {
     const videoElement = document.getElementById(`remote-${userId}`);
     if (videoElement) {
       videoElement.remove();
+      console.log("Removed remote video for:", userId);
     }
   }
 
   toggleVideo() {
     this.isVideoEnabled = !this.isVideoEnabled;
-    this.localStream.getVideoTracks().forEach((track) => {
-      track.enabled = this.isVideoEnabled;
-    });
+    if (this.localStream) {
+      this.localStream.getVideoTracks().forEach((track) => {
+        track.enabled = this.isVideoEnabled;
+      });
+    }
     this.toggleVideoBtn.classList.toggle("active", this.isVideoEnabled);
+    this.toggleVideoBtn.textContent = this.isVideoEnabled ? "📹" : "📹❌";
   }
 
   toggleAudio() {
     this.isAudioEnabled = !this.isAudioEnabled;
-    this.localStream.getAudioTracks().forEach((track) => {
-      track.enabled = this.isAudioEnabled;
-    });
+    if (this.localStream) {
+      this.localStream.getAudioTracks().forEach((track) => {
+        track.enabled = this.isAudioEnabled;
+      });
+    }
     this.toggleAudioBtn.classList.toggle("active", this.isAudioEnabled);
+    this.toggleAudioBtn.textContent = this.isAudioEnabled ? "🎤" : "🎤❌";
   }
 
   endCall() {
     // Stop local stream
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => track.stop());
+      this.localStream = null;
     }
 
     // Close all peer connections
@@ -264,9 +335,13 @@ class VideoCallApp {
     // Clear remote videos
     this.remoteVideos.innerHTML = "";
 
-    // Disconnect from room
-    this.socket.disconnect();
-    this.socket.connect();
+    // Reset button states
+    this.isVideoEnabled = true;
+    this.isAudioEnabled = true;
+    this.toggleVideoBtn.classList.add("active");
+    this.toggleAudioBtn.classList.add("active");
+    this.toggleVideoBtn.textContent = "📹";
+    this.toggleAudioBtn.textContent = "🎤";
 
     this.goHome();
   }
