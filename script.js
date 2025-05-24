@@ -1,6 +1,6 @@
 class VideoCallApp {
   constructor() {
-    this.socket = io("http://192.168.20.70:4000");
+    this.socket = io("https://hackathon-be-xaqp.onrender.com");
     this.localStream = null;
     this.peerConnections = new Map();
     this.currentRoomId = null;
@@ -96,7 +96,7 @@ class VideoCallApp {
   async createRoom() {
     try {
       const response = await fetch(
-        "http://192.168.20.70:4000/api/create-room",
+        "https://hackathon-be-xaqp.onrender.com/api/create-room",
         {
           method: "POST",
         }
@@ -118,7 +118,7 @@ class VideoCallApp {
 
     try {
       const response = await fetch(
-        `http://192.168.20.70:4000/api/room/${roomId}`
+        `https://hackathon-be-xaqp.onrender.com/api/room/${roomId}`
       );
       const data = await response.json();
 
