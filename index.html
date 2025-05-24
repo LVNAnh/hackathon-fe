@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Call App</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Màn hình chính -->
+      <div id="home-screen" class="screen active">
+        <div class="container">
+          <h1>Video Call App</h1>
+          <div class="actions">
+            <button id="create-room-btn" class="btn primary">
+              Tạo phòng mới
+            </button>
+            <div class="join-room">
+              <input
+                type="text"
+                id="room-id-input"
+                placeholder="Nhập mã phòng"
+                maxlength="6"
+              />
+              <button id="join-room-btn" class="btn secondary">Tham gia</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Màn hình chờ -->
+      <div id="waiting-screen" class="screen">
+        <div class="container">
+          <h2>Phòng: <span id="current-room-id"></span></h2>
+          <p>Chia sẻ mã phòng để mời người khác tham gia</p>
+          <div class="user-setup">
+            <input
+              type="text"
+              id="user-name-input"
+              placeholder="Nhập tên của bạn"
+            />
+            <button id="start-call-btn" class="btn primary">
+              Bắt đầu cuộc gọi
+            </button>
+          </div>
+          <button id="back-btn" class="btn secondary">Quay lại</button>
+        </div>
+      </div>
+
+      <!-- Màn hình video call -->
+      <div id="call-screen" class="screen">
+        <div id="videos-container">
+          <div id="local-video-container" class="video-container">
+            <video id="local-video" autoplay muted playsinline></video>
+            <div class="video-label">Bạn</div>
+          </div>
+          <div id="remote-videos"></div>
+        </div>
+
+        <div id="controls">
+          <button id="toggle-video-btn" class="control-btn active">📹</button>
+          <button id="toggle-audio-btn" class="control-btn active">🎤</button>
+          <button id="end-call-btn" class="control-btn danger">📞</button>
+        </div>
+
+        <div id="room-info">Phòng: <span id="call-room-id"></span></div>
+      </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="script.js"></script>
+  </body>
+</html>
